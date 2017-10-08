@@ -7,5 +7,5 @@ authors = ["Thiago Pontes <github@thiago.me>"]
 regex = "0.2"
 
 [dependencies.bencode]
-git = "https://github.com/murarth/bencode"
+git = "https://github.com/arjantop/rust-bencode"
 
