@@ -1,12 +1,14 @@
 #![allow(dead_code)]
 
 extern crate bencode;
+extern crate crypto;
 
 use bencode::{FromBencode, Bencode, NumFromBencodeError, StringFromBencodeError};
 use bencode::util::ByteString;
 use std::fs::File;
 use std::io::{self, Read, Write};
-
+use crypto::sha1::Sha1;
+use crypto::digest::Digest;
 
 #[derive(Debug)]
 enum DecodingError {
@@ -92,6 +94,7 @@ impl FromBencode for Info {
 
 struct MetaInfo {
     info: Info,
+    hash: String,
     announce: String,
     created_by: Option<String>,
     creation_date: Option<u64>,
@@ -130,8 +133,12 @@ impl FromBencode for MetaInfo {
                 }
                 let info_dict = m.get(&ByteString::from_str("info")).expect("info field not found");
                 let info = Info::from_bencode(info_dict).unwrap();
+                let mut hasher = Sha1::new();
+                let bytevec = info_dict.to_bytes().unwrap();
+                hasher.input(bytevec.as_slice());
                 Ok(MetaInfo{
                     info: info,
+                    hash: hasher.result_str(),
                     announce: announce_option.expect("no announce url found"),
                     created_by: created_by,
                     creation_date: creation_date,
@@ -157,6 +164,8 @@ fn main() {
     println!("created by {:?}", meta_info.created_by);
     println!("creation date {:?}", meta_info.creation_date);
     println!("encoding {:?}", meta_info.encoding);
+    println!("private {:?}", meta_info.info.private);
+    println!("info hash {}", meta_info.hash);
     match meta_info.info.mode {
         Mode::Single(single) => {
             println!("md5sum {:?}", single.md5sum);
