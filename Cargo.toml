@@ -4,7 +4,9 @@ version = "0.1.0"
 authors = ["Thiago Pontes <github@thiago.me>"]
 
 [dependencies]
+reqwest = "0.7.3"
 rust-crypto = "^0.2"
+hyper = "^0.8"
 
 [dependencies.bencode]
 git = "https://github.com/arjantop/rust-bencode"

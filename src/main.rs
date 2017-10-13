@@ -2,160 +2,73 @@
 
 extern crate bencode;
 extern crate crypto;
+extern crate hyper;
+extern crate reqwest;
 
 use bencode::{FromBencode, Bencode, NumFromBencodeError, StringFromBencodeError};
 use bencode::util::ByteString;
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 use crypto::sha1::Sha1;
 use crypto::digest::Digest;
+use hyper::Url;
 
-#[derive(Debug)]
-enum DecodingError {
-    MissingField(String),
-    NotADict,
-    NotANumber(NumFromBencodeError),
-    NotAString(StringFromBencodeError)
-}
+mod decoder_helper;
+mod meta_info;
+mod tracker_response;
 
-struct FileDesc {
-    length: i64,
-    md5sum: Option<String>,
-    path: Vec<String>,
-}
+use meta_info::{ MetaInfo, Mode };
+use tracker_response::TrackerResponse;
 
-struct MultiFile {
-    files: Vec<FileDesc>,
-}
-
-struct SingleFile {
-    length: i64,
-    md5sum: Option<String>,
-}
-
-enum Mode {
-    Single(SingleFile),
-    Multiple(MultiFile),
-}
-
-struct Info {
-    mode: Mode,
-    name: String,
-    piece_length: i64,
-    pieces: Vec<u8>,
-    private: Option<u8>,
-}
-
-impl FromBencode for Info {
-    type Err = DecodingError;
-    fn from_bencode(bencode: &Bencode) -> Result<Info, DecodingError> {
-        use DecodingError::*;
-        match bencode {
-            &Bencode::Dict(ref m) => {
-                let mut private = None;
-                let length = m.get(&ByteString::from_str("piece length")).expect("piece length not defined");
-                let mut value = m.get(&ByteString::from_str("name")).expect("file name not defined");
-                let name = FromBencode::from_bencode(value).ok().expect("error decoding name");
-                value =  m.get(&ByteString::from_str("pieces")).expect("pieces not defined");
-                match value {
-                    &Bencode::ByteString(ref vec) =>  {
-                        if let Some(value) = m.get(&ByteString::from_str("private")) {
-                            private = FromBencode::from_bencode(value).ok();
-                        }
-                        // if it has length it means its single file
-                        if let Some(value) = m.get(&ByteString::from_str("length")) {
-                            let mut md5sum = None;
-                            let length = FromBencode::from_bencode(value).ok().expect("file size not defined");
-                            if let Some(value) = m.get(&ByteString::from_str("md5sum")) {
-                                md5sum = FromBencode::from_bencode(value).ok();
-                            }
-
-                            let mode = Mode::Single(SingleFile {
-                                length: length,
-                                md5sum: md5sum,
-                            });
-                            return Ok(Info {
-                                mode: mode,
-                                name: name,
-                                piece_length: length,
-                                private: private,
-                                pieces: vec.clone(),
-                            });
-                        }
-                    },
-                    _ => panic!("pieces not a byte string"),
-                }
-                Err(MissingField("multifile support not implemented".to_string()))
-            },
-            _ => Err(NotADict),
-        }
+fn tracker(meta_info: MetaInfo) {
+    let time = SystemTime::now().duration_since(UNIX_EPOCH).expect("time went backwards");
+    let mut hasher = Sha1::new();
+    hasher.input_str(&time.as_secs().to_string());
+    let port = 6881;
+    let uploaded = 0;
+    let downloaded = 0;
+    let left = meta_info.info.piece_length;
+    let compact = 0;
+    let no_peer_id = 0;
+    let event = "started";
+    let mut url = Url::parse(&meta_info.announce).expect("invalid announce url");
+    let result = hasher.result_str();
+    let hashed_id = format!("TR-2-92-{}", result);
+    let prefixed_peer_id = hashed_id.get(..20).expect("error");
+    let mut query = vec![
+        ("info_hash".to_string(), meta_info.hash),
+        ("peer_id".to_string(), prefixed_peer_id.to_string()),
+        ("port".to_string(), port.to_string()),
+        ("uploaded".to_string(), uploaded.to_string()),
+        ("downloaded".to_string(), downloaded.to_string()),
+        ("left".to_string(), left.to_string()),
+        ("compact".to_string(), compact.to_string()),
+        ("no_peer_id".to_string(), no_peer_id.to_string()),
+        ("event".to_string(), event.to_string()),
+    ];
+    if let Some(queries) = url.query_pairs() {
+        query.extend(queries.iter().cloned());
     }
+    url.set_query_from_pairs(query);
+    let full_url = url.serialize();
+    println!("making request to tracker: {}", full_url);
+    let mut response = reqwest::get(&full_url).unwrap();
+    let mut buf = Vec::new();
+    let _ = response.read_to_end(&mut buf);
+    println!("response: {}", buf.len());
+    let resp = bencode::from_vec(buf).unwrap();
+    let tracker_response: TrackerResponse = FromBencode::from_bencode(&resp).unwrap();
+    println!("interval yay {}", tracker_response.interval);
 }
 
-struct MetaInfo {
-    info: Info,
-    hash: String,
-    announce: String,
-    created_by: Option<String>,
-    creation_date: Option<u64>,
-    comment: Option<String>,
-    encoding: Option<String>,
-}
-
-impl FromBencode for MetaInfo {
-    type Err = DecodingError;
-    fn from_bencode(bencode: &Bencode) -> Result<MetaInfo, DecodingError> {
-        use DecodingError::*;
-        match bencode {
-            &Bencode::Dict(ref m) => {
-                let mut announce_option = None;
-                let mut created_by = None;
-                let mut creation_date = None;
-                let mut comment = None;
-                let mut encoding = None;
-                if let Some(value) = m.get(&ByteString::from_str("announce")) {
-                    announce_option = FromBencode::from_bencode(value).ok();
-                }
-                if let Some(value) = m.get(&ByteString::from_str("created by")) {
-                    created_by = FromBencode::from_bencode(value).ok();
-                }
-                if let Some(value) = m.get(&ByteString::from_str("creation date")) {
-                    creation_date = FromBencode::from_bencode(value).ok();
-                }
-                if let Some(value) = m.get(&ByteString::from_str("comment")) {
-                    comment = FromBencode::from_bencode(value).ok();
-                }
-                if let Some(value) = m.get(&ByteString::from_str("encoding")) {
-                    encoding = FromBencode::from_bencode(value).ok();
-                }
-                if announce_option.is_none() {
-                    return Err(MissingField("missing announce field".to_string()))
-                }
-                let info_dict = m.get(&ByteString::from_str("info")).expect("info field not found");
-                let info = Info::from_bencode(info_dict).unwrap();
-                let mut hasher = Sha1::new();
-                let bytevec = info_dict.to_bytes().unwrap();
-                hasher.input(bytevec.as_slice());
-                Ok(MetaInfo{
-                    info: info,
-                    hash: hasher.result_str(),
-                    announce: announce_option.expect("no announce url found"),
-                    created_by: created_by,
-                    creation_date: creation_date,
-                    comment: comment,
-                    encoding: encoding,
-                })
-            },
-            _ => Err(NotADict),
-        }
-    }
-}
 
 fn main() {
-    let mut file = File::open("harry.torrent").expect("error opening file");
+    let mut file = File::open("got.torrent").expect("error opening file");
+    //let mut file = File::open("harry.torrent").expect("error opening file");
     let mut buf = Vec::new();
     let _ = file.read_to_end(&mut buf);
-    let bencode: bencode::Bencode = bencode::from_vec(buf).unwrap();
+    let bencode: bencode::Bencode = bencode::from_vec(buf).expect("kill me");
     let meta_info: MetaInfo = FromBencode::from_bencode(&bencode).unwrap();
     println!("GET {}", meta_info.announce);
     println!("name {}", meta_info.info.name);
@@ -165,7 +78,7 @@ fn main() {
     println!("creation date {:?}", meta_info.creation_date);
     println!("encoding {:?}", meta_info.encoding);
     println!("private {:?}", meta_info.info.private);
-    println!("info hash {}", meta_info.hash);
+    tracker(meta_info.clone());
     match meta_info.info.mode {
         Mode::Single(single) => {
             println!("md5sum {:?}", single.md5sum);
